@@ -53,4 +53,12 @@ A simple scraper of wordpress themes in [themeforest.net][themeforest.net].
 ]
 ```
 
+#Credits
+
+| Library                     | Description              |
+| --------------------------- | ------------------------ |
+| [github.com/gocolly/colly]  | scrapping the data       |
+
+
 [themeforest.net]: https://themeforest.net
+[github.com/gocolly/colly]:https://github.com/gocolly/colly
