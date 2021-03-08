@@ -4,44 +4,78 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/gocolly/colly"
+	"github.com/gocolly/colly/extensions"
 	"io/ioutil"
 	"log"
 	"strings"
+	"temmo/models"
 )
 
-type Design struct {
-	Url string `json:"url"`
-	PreviewUrl string `json:"previewUrl"`
-	Name string `json:"name"`
-	Image string `json:"image"`
-	Price string `json:"price"`
-	Sales string `json:"sales"`
-	Comments string `json:"comments"`
-	SellerName string `json:"sellerName"`
-	SellerUrl string `json:"sellerUrl"`
-	Created string `json:"created"`
-	LastUpdated string `json:"lastUpdated"`
-	Description string `json:"description"`
-	HighResolution string `json:"highResolution"`
-	CompatibleBrowser string `json:"compatibleBrowser"`
-	CompatibleWith string `json:"compatibleWith"`
-	Included string `json:"included"`
-	Column string `json:"column"`
-	Documentation string `json:"documentation"`
-	Layout string `json:"layout"`
-	Tags string `json:"tags"`
-}
+const baseUrl = "https://themeforest.net"
+const startUrl = "/category/wordpress?sort=date"
+
+var (
+	baseCollector = buildCollector()
+)
 
 func main() {
-	startUrl := "https://themeforest.net/category/site-templates/corporate?sort=date"
-	allowedDomains := []string {"themeforest.net", "www.themeforest.net"}
+	scrapeCategory()
+}
 
-	allDesigns := make([]Design, 0)
+func buildCollector() *colly.Collector {
+	allowedDomains := []string{"themeforest.net", "www.themeforest.net"}
 
 	collector := colly.NewCollector(
 		colly.AllowedDomains(allowedDomains...),
 		colly.CacheDir("./themeforest_cache"),
+		colly.Async(true),
 	)
+
+	extensions.RandomUserAgent(collector)
+	extensions.Referer(collector)
+
+	return collector
+}
+
+func scrapeCategory() {
+	allCategories := make([]models.Category, 0)
+	collector := baseCollector.Clone()
+	collector.OnRequest(func(request *colly.Request) {
+		fmt.Println("Visiting Base: ", request.URL.String())
+	})
+
+	collector.OnHTML(`ul[data-test-selector="category-filter"] li`, func(element *colly.HTMLElement) {
+		url := element.ChildAttr(`li a`, "href")
+		if !strings.HasPrefix(url, "/search?sort") && !strings.HasPrefix(url, "/category/wordpress?sort") {
+			name := element.ChildText(`li a`)
+			_cat := models.Category{
+				Url:      url,
+				Name:     name,
+				Children: make([]models.Category, 0),
+			}
+			scrapeWPThemes(fmt.Sprint(baseUrl, url))
+			allCategories = append(allCategories, _cat)
+		}
+	})
+
+	url := fmt.Sprint(baseUrl, startUrl)
+	err := collector.Visit(url)
+	if err != nil {
+		log.Println("Got error when scrape visit:", url)
+	}
+
+	collector.Wait()
+	writeToJson(allCategories, "categories.json")
+}
+
+func scrapeWPThemes(catUrl string) {
+	allDesigns := make([]models.Design, 0)
+
+	collector := baseCollector.Clone()
+
+	collector.OnRequest(func(request *colly.Request) {
+		fmt.Println("Visiting Page: ", request.URL.String())
+	})
 
 	detailCollector := collector.Clone()
 
@@ -49,18 +83,24 @@ func main() {
 	collector.OnHTML(`nav[role="navigation"] li a[href]`, func(element *colly.HTMLElement) {
 		link := element.Attr("href")
 
-		if !strings.HasPrefix(link, "/category/site-templates/corporate"){
+		if !strings.HasPrefix(link, "/category/site-templates/corporate") {
 			return
 		}
 
-		element.Request.Visit(link)
+		err := element.Request.Visit(link)
+		if err != nil {
+			log.Println("Got error when scrape visit:", link)
+		}
 	})
 
 	// visit detail page
 	collector.OnHTML("._2Pk9X", func(element *colly.HTMLElement) {
 		url := element.Attr("href")
 
-		detailCollector.Visit(url)
+		err := detailCollector.Visit(url)
+		if err != nil {
+			log.Println("Got error when scrape visit:", url)
+		}
 	})
 
 	// collect detail page information
@@ -98,16 +138,16 @@ func main() {
 		}
 		log.Println("description:", description)
 
-		design := Design{
-			Url: url,
-			PreviewUrl: previewUrl,
-			Name: name,
-			Image: image,
-			Price: price,
-			Sales: sales,
-			Comments: comments,
-			SellerName: sellerName,
-			SellerUrl: sellerUrl,
+		design := models.Design{
+			Url:         url,
+			PreviewUrl:  previewUrl,
+			Name:        name,
+			Image:       image,
+			Price:       price,
+			Sales:       sales,
+			Comments:    comments,
+			SellerName:  sellerName,
+			SellerUrl:   sellerUrl,
 			Description: description,
 		}
 
@@ -159,25 +199,27 @@ func main() {
 		allDesigns = append(allDesigns, design)
 	})
 
-	collector.OnRequest(func(request *colly.Request) {
-		fmt.Println("Visiting Page: ", request.URL.String())
-	})
-
 	detailCollector.OnRequest(func(request *colly.Request) {
 		fmt.Println("Visiting Detail Page: ", request.URL.String())
 	})
 
-	collector.Visit(startUrl)
+	err := collector.Visit(catUrl)
+	if err != nil {
+		log.Println("Got error when scrape visit:", catUrl)
+	}
+
+	collector.Wait()
+	detailCollector.Wait()
 
 	// write to json
-	writeToJson(allDesigns)
+	writeToJson(allDesigns, "designs.json")
 }
 
-func writeToJson(data []Design) {
+func writeToJson(data interface{}, name string) {
 	file, err := json.MarshalIndent(data, "", " ")
-	if(err != nil) {
+	if err != nil {
 		log.Println("Can not create a json")
 		return
 	}
-	_ = ioutil.WriteFile("designs.json", file, 0644)
+	_ = ioutil.WriteFile(name, file, 0644)
 }
