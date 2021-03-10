@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"github.com/gocolly/colly"
 	"github.com/gocolly/colly/extensions"
+	uuid "github.com/nu7hatch/gouuid"
 	"io/ioutil"
 	"log"
+	"strconv"
 	"strings"
+	"sync"
 	"temmo/models"
 )
 
@@ -16,10 +19,17 @@ const startUrl = "/category/wordpress?sort=date"
 
 var (
 	baseCollector = buildCollector()
+	baseFolder    = fmt.Sprintf("data-%s", getUUID())
+	smx           sync.Mutex
 )
 
 func main() {
-	scrapeCategory()
+	startScrape()
+}
+
+func getUUID() string {
+	u, _ := uuid.NewV4()
+	return u.String()
 }
 
 func buildCollector() *colly.Collector {
@@ -27,8 +37,7 @@ func buildCollector() *colly.Collector {
 
 	collector := colly.NewCollector(
 		colly.AllowedDomains(allowedDomains...),
-		colly.CacheDir("./themeforest_cache"),
-		colly.Async(true),
+		colly.CacheDir(fmt.Sprintf("./%s/themeforest_cache", baseFolder)),
 	)
 
 	extensions.RandomUserAgent(collector)
@@ -37,14 +46,14 @@ func buildCollector() *colly.Collector {
 	return collector
 }
 
-func scrapeCategory() {
+func startScrape() {
 	allCategories := make([]models.Category, 0)
 	collector := baseCollector.Clone()
 	collector.OnRequest(func(request *colly.Request) {
 		fmt.Println("Visiting Base: ", request.URL.String())
 	})
 
-	collector.OnHTML(`ul[data-test-selector="category-filter"] li`, func(element *colly.HTMLElement) {
+	collector.OnHTML(`div[data-test-selector="search-filters"] ul[data-test-selector="category-filter"] li`, func(element *colly.HTMLElement) {
 		url := element.ChildAttr(`li a`, "href")
 		if !strings.HasPrefix(url, "/search?sort") && !strings.HasPrefix(url, "/category/wordpress?sort") {
 			name := element.ChildText(`li a`)
@@ -53,8 +62,12 @@ func scrapeCategory() {
 				Name:     name,
 				Children: make([]models.Category, 0),
 			}
-			scrapeWPThemes(fmt.Sprint(baseUrl, url))
+
+			scrapePerCategory(fmt.Sprint(baseUrl, url), name)
+
+			smx.Lock()
 			allCategories = append(allCategories, _cat)
+			smx.Unlock()
 		}
 	})
 
@@ -64,11 +77,47 @@ func scrapeCategory() {
 		log.Println("Got error when scrape visit:", url)
 	}
 
+	collector.OnScraped(func(response *colly.Response) {
+		writeToJson(allCategories, "categories.json")
+	})
+
 	collector.Wait()
-	writeToJson(allCategories, "categories.json")
 }
 
-func scrapeWPThemes(catUrl string) {
+func scrapePerCategory(catUrl string, catName string) {
+
+	collector := baseCollector.Clone()
+
+	collector.OnRequest(func(request *colly.Request) {
+		fmt.Println("Visiting Page: ", request.URL.String())
+	})
+
+	// visit all page
+	collector.OnHTML(`nav[role="navigation"] li:nth-last-child(2) a[href]`, func(element *colly.HTMLElement) {
+		link := element.Attr("href")
+
+		if !strings.HasPrefix(link, "/category/wordpress/") {
+			return
+		}
+
+		pageMax, _ := strconv.Atoi(element.Text)
+
+		for i := 1; i <= pageMax; i++ {
+			pageUrl := fmt.Sprintf("%s&page=%s", strings.ReplaceAll(catUrl, "#content", ""), strconv.Itoa(i))
+
+			scrapePerPage(pageUrl, catName, strconv.Itoa(i))
+		}
+	})
+
+	err := collector.Visit(catUrl)
+	if err != nil {
+		log.Println("Got error when scrape visit:", catUrl)
+	}
+
+	collector.Wait()
+}
+
+func scrapePerPage(catPageUrl string, catName string, page string) {
 	allDesigns := make([]models.Design, 0)
 
 	collector := baseCollector.Clone()
@@ -77,26 +126,11 @@ func scrapeWPThemes(catUrl string) {
 		fmt.Println("Visiting Page: ", request.URL.String())
 	})
 
-	detailCollector := collector.Clone()
-
-	// visit all page
-	collector.OnHTML(`nav[role="navigation"] li a[href]`, func(element *colly.HTMLElement) {
-		link := element.Attr("href")
-
-		if !strings.HasPrefix(link, "/category/site-templates/corporate") {
-			return
-		}
-
-		err := element.Request.Visit(link)
-		if err != nil {
-			log.Println("Got error when scrape visit:", link)
-		}
-	})
+	detailCollector := baseCollector.Clone()
 
 	// visit detail page
 	collector.OnHTML("._2Pk9X", func(element *colly.HTMLElement) {
 		url := element.Attr("href")
-
 		err := detailCollector.Visit(url)
 		if err != nil {
 			log.Println("Got error when scrape visit:", url)
@@ -105,41 +139,33 @@ func scrapeWPThemes(catUrl string) {
 
 	// collect detail page information
 	detailCollector.OnHTML(`div.page`, func(element *colly.HTMLElement) {
+
 		url := element.Request.URL.String()
-		log.Println("Extract detail page", element.Request.URL)
 
 		previewUrl := element.ChildAttr(`a.btn-icon.live-preview`, "href")
-		log.Println("live preview:", previewUrl)
 
 		name := element.ChildText(`div.item-header h1.t-heading.is-hidden-phone`)
-		log.Println("name:", name)
 
 		image := element.ChildAttr(`div.item-preview a img`, "src")
-		log.Println("image:", image)
 
 		price := element.ChildText("div.item-header__price b.t-currency span.js-item-header__price")
-		log.Println("price:", price)
 
 		sales := element.ChildText(`div.sidebar-stats__item div.box > strong.sidebar-stats__number`)
-		log.Println("sales:", sales)
 
 		comments := element.ChildText(`div.sidebar-stats__item div.box a.t-link strong.sidebar-stats__number`)
-		log.Println("comments:", comments)
 
 		sellerName := element.ChildText(`div.media__body h2 a.t-link[rel="author"]`)
-		log.Println("sellerName:", sellerName)
 
 		sellerUrl := element.ChildAttr(`div.media__body h2 a.t-link[rel="author"]`, "href")
-		log.Println("sellerUrl:", sellerUrl)
 
 		description, err := element.DOM.Find(`div.user-html`).Html()
 		if err != nil {
 			log.Println("Cannot get description")
 		}
-		log.Println("description:", description)
 
 		design := models.Design{
 			Url:         url,
+			CatName:     catName,
 			PreviewUrl:  previewUrl,
 			Name:        name,
 			Image:       image,
@@ -156,63 +182,58 @@ func scrapeWPThemes(catUrl string) {
 			case "Last Update":
 				lastUpdated := element.ChildAttr(`time.updated`, "datetime")
 				design.LastUpdated = lastUpdated
-				log.Println("lastUpdated:", lastUpdated)
 			case "Created":
 				created := element.ChildText(`td:nth-child(2) span`)
 				design.Created = created
-				log.Println("created:", created)
 			case "High Resolution":
 				highResolution := element.ChildText(`td:nth-child(2) a`)
 				design.HighResolution = highResolution
-				log.Println("highResolution:", highResolution)
 			case "Compatible Browsers":
 				compatibleBrowser := element.ChildText(`td:nth-child(2)`)
 				design.CompatibleBrowser = compatibleBrowser
-				log.Println("compatibleBrowser:", compatibleBrowser)
 			case "Compatible With":
 				compatibleWith := element.ChildText(`td:nth-child(2)`)
 				design.CompatibleWith = compatibleWith
-				log.Println("compatibleWith:", compatibleWith)
 			case "ThemeForest Files Included":
 				included := element.ChildText(`td:nth-child(2)`)
 				design.Included = included
-				log.Println("included:", included)
 			case "Columns":
 				columns := element.ChildText(`td:nth-child(2)`)
 				design.Column = columns
-				log.Println("columns:", columns)
 			case "Documentation":
 				documentation := element.ChildText(`td:nth-child(2)`)
 				design.Documentation = documentation
-				log.Println("Documentation:", documentation)
 			case "Layout":
 				layout := element.ChildText(`td:nth-child(2)`)
 				design.Layout = layout
-				log.Println("layout:", layout)
 			case "Tags":
 				tags := element.ChildText(`td:nth-child(2)`)
 				design.Tags = tags
-				log.Println("tags:", tags)
 			}
 		})
 
+		smx.Lock()
 		allDesigns = append(allDesigns, design)
+		smx.Unlock()
 	})
 
 	detailCollector.OnRequest(func(request *colly.Request) {
 		fmt.Println("Visiting Detail Page: ", request.URL.String())
 	})
 
-	err := collector.Visit(catUrl)
+	err := collector.Visit(catPageUrl)
 	if err != nil {
-		log.Println("Got error when scrape visit:", catUrl)
+		log.Println("Got error when scrape visit:", catPageUrl)
 	}
 
 	collector.Wait()
+
 	detailCollector.Wait()
 
-	// write to json
-	writeToJson(allDesigns, "designs.json")
+	// write data per category to json
+	uuidName := getUUID()
+	fileName := fmt.Sprintf("design-%s-%s-%s.json", catName, page, uuidName)
+	writeToJson(allDesigns, fileName)
 }
 
 func writeToJson(data interface{}, name string) {
@@ -221,5 +242,6 @@ func writeToJson(data interface{}, name string) {
 		log.Println("Can not create a json")
 		return
 	}
-	_ = ioutil.WriteFile(name, file, 0644)
+	fileName := fmt.Sprintf("./%s/%s", baseFolder, name)
+	_ = ioutil.WriteFile(fileName, file, 0644)
 }

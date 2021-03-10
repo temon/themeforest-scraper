@@ -2,6 +2,7 @@ package models
 
 type Design struct {
 	Url               string `json:"url"`
+	CatName           string `json:"catName"`
 	PreviewUrl        string `json:"previewUrl"`
 	Name              string `json:"name"`
 	Image             string `json:"image"`
