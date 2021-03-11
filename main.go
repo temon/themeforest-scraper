@@ -12,15 +12,15 @@ import (
 	"strings"
 	"sync"
 	"temmo/models"
+	"time"
 )
 
 const baseUrl = "https://themeforest.net"
 const startUrl = "/category/wordpress?sort=date"
 
 var (
-	baseCollector = buildCollector()
-	baseFolder    = fmt.Sprintf("data-%s", getUUID())
-	smx           sync.Mutex
+	baseFolder = fmt.Sprintf("data-%s", getUUID())
+	smx        sync.Mutex
 )
 
 func main() {
@@ -37,18 +37,24 @@ func buildCollector() *colly.Collector {
 
 	collector := colly.NewCollector(
 		colly.AllowedDomains(allowedDomains...),
+		colly.Async(true),
 		colly.CacheDir(fmt.Sprintf("./%s/themeforest_cache", baseFolder)),
 	)
 
-	extensions.RandomUserAgent(collector)
-	extensions.Referer(collector)
+	_ = collector.Limit(&colly.LimitRule{
+		DomainRegexp: "themeforest.net",
+		RandomDelay:  3 * time.Second,
+		Parallelism:  6,
+	})
 
 	return collector
 }
 
 func startScrape() {
 	allCategories := make([]models.Category, 0)
-	collector := baseCollector.Clone()
+	collector := buildCollector()
+	extensions.RandomUserAgent(collector)
+	extensions.Referer(collector)
 	collector.OnRequest(func(request *colly.Request) {
 		fmt.Println("Visiting Base: ", request.URL.String())
 	})
@@ -86,7 +92,9 @@ func startScrape() {
 
 func scrapePerCategory(catUrl string, catName string) {
 
-	collector := baseCollector.Clone()
+	collector := buildCollector().Clone()
+	extensions.RandomUserAgent(collector)
+	extensions.Referer(collector)
 
 	collector.OnRequest(func(request *colly.Request) {
 		fmt.Println("Visiting Page: ", request.URL.String())
@@ -120,13 +128,19 @@ func scrapePerCategory(catUrl string, catName string) {
 func scrapePerPage(catPageUrl string, catName string, page string) {
 	allDesigns := make([]models.Design, 0)
 
-	collector := baseCollector.Clone()
+	collector := buildCollector().Clone()
+	extensions.RandomUserAgent(collector)
+	extensions.Referer(collector)
 
 	collector.OnRequest(func(request *colly.Request) {
 		fmt.Println("Visiting Page: ", request.URL.String())
 	})
 
-	detailCollector := baseCollector.Clone()
+	detailCollector := buildCollector().Clone()
+	extensions.RandomUserAgent(detailCollector)
+	extensions.Referer(detailCollector)
+
+	detailCollector.MaxDepth = 1
 
 	// visit detail page
 	collector.OnHTML("._2Pk9X", func(element *colly.HTMLElement) {
@@ -218,7 +232,7 @@ func scrapePerPage(catPageUrl string, catName string, page string) {
 	})
 
 	detailCollector.OnRequest(func(request *colly.Request) {
-		fmt.Println("Visiting Detail Page: ", request.URL.String())
+		fmt.Println("Visiting Detail Page: ", request.URL.String(), request.Headers.Get("User-Agent"))
 	})
 
 	err := collector.Visit(catPageUrl)
